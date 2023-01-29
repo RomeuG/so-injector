@@ -106,7 +106,7 @@ impl Ptrace {
         Ok(registers)
     }
 
-    fn set_registers(&mut self, registers: &mut libc::user_regs_struct) -> Result<()> {
+    fn set_registers(&mut self, registers: &libc::user_regs_struct) -> Result<()> {
         let result = unsafe { libc::ptrace(libc::PTRACE_SETREGS, self.pid, 0, registers) };
 
         if result == -1 {
@@ -173,6 +173,24 @@ impl Process {
         if let Some(p) = self._ptrace.as_mut() {
             let result = p.waitsig(signal)?;
             return Ok(result);
+        }
+
+        Err(Error::PtraceNotInstantiated)
+    }
+
+    fn getregs(&mut self) -> Result<libc::user_regs_struct> {
+        if let Some(p) = self._ptrace.as_mut() {
+            let result = p.get_registers()?;
+            return Ok(result);
+        }
+
+        Err(Error::PtraceNotInstantiated)
+    }
+
+    fn setregs(&mut self, registers: &libc::user_regs_struct) -> Result<()> {
+        if let Some(p) = self._ptrace.as_mut() {
+            p.set_registers(registers)?;
+            return Ok(());
         }
 
         Err(Error::PtraceNotInstantiated)
@@ -253,7 +271,7 @@ fn get_first_executable_address(pid: i32) -> Option<u64> {
     None
 }
 
-unsafe fn file_read(file: &mut File, address: u64, n: usize) -> Vec<u8> {
+fn file_read(file: &mut File, address: u64, n: usize) -> Vec<u8> {
     let mut bytes_vec = vec![0; n];
 
     file.seek(SeekFrom::Start(address)).unwrap();
@@ -264,7 +282,7 @@ unsafe fn file_read(file: &mut File, address: u64, n: usize) -> Vec<u8> {
     bytes_vec
 }
 
-unsafe fn file_write(file: &mut File, address: u64, bytes: &[u8]) {
+fn file_write(file: &mut File, address: u64, bytes: &[u8]) {
     file.seek(SeekFrom::Start(address)).unwrap();
     let b = file.write(bytes).unwrap();
 
@@ -281,233 +299,48 @@ unsafe fn get_func_address(dlname: &str, function_name: &str) -> u64 {
     address as u64
 }
 
-// unsafe fn waitsig(pid: libc::pid_t, signal: i32) -> bool {
-//     let mut status: i32 = std::mem::zeroed();
-//     if libc::waitpid(pid, &mut status, 0) == -1 {
-//         println!("Couldn't execute waitpid ({})", errno());
-//         std::process::exit(1);
-//     }
-
-//     libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == signal
-// }
-
-#[inline(always)]
-unsafe fn _malloc(process: &mut Process, malloc_address: u64, size: u64) -> Result<u64> {
+fn _exec(process: &mut Process, address: u64, args: &[u64]) -> Result<u64> {
     let _ = process.ptrace()?;
 
-    let mut regs: libc::user_regs_struct = std::mem::zeroed();
-    let mut regs_old: libc::user_regs_struct = std::mem::zeroed();
+    let mut regs = process.getregs()?;
+    let mut regs_old: libc::user_regs_struct = unsafe { std::mem::zeroed() };
 
-    if libc::ptrace(libc::PTRACE_GETREGS, process.pid, 0, &mut regs) == -1 {
-        println!("Error while getting registers ({})", errno());
-        std::process::exit(1);
-    }
-
-    libc::memcpy(
-        std::mem::transmute::<*mut libc::user_regs_struct, *mut libc::c_void>(&mut regs_old),
-        std::mem::transmute::<*mut libc::user_regs_struct, *mut libc::c_void>(&mut regs),
-        std::mem::size_of::<libc::user_regs_struct>(),
-    );
-
-    regs.rax = malloc_address;
-    regs.rdi = size;
-    regs.rsi = 0;
-    regs.rdx = 0;
-    regs.rcx = 0;
-    regs.r8 = 0;
-    regs.r9 = 0;
-
-    if libc::ptrace(libc::PTRACE_SETREGS, process.pid, 0, &mut regs) == -1 {
-        println!("Error setting registers ({})", *libc::__errno_location());
-        std::process::exit(1);
-    }
-
-    let backup_bytes = file_read(&mut process.mem_file, regs.rip, 4);
-    println!("Backup bytes: {:x?}", backup_bytes);
-    file_write(&mut process.mem_file, regs.rip, &[0xff, 0xd0, 0xcc, 0x00]);
-
-    if libc::ptrace(libc::PTRACE_CONT, process.pid, 0, 0) == -1 {
-        println!("Error PTRACE_CONT ({})", *libc::__errno_location());
-        std::process::exit(1);
-    }
-
-    let waitsig_res = process.waitsig(5)?;
-    println!("Waitsig result: {waitsig_res}");
-
-    if libc::ptrace(libc::PTRACE_GETREGS, process.pid, 0, &mut regs) == -1 {
-        println!(
-            "Error while getting registers ({})",
-            *libc::__errno_location()
+    unsafe {
+        libc::memcpy(
+            std::mem::transmute::<*mut libc::user_regs_struct, *mut libc::c_void>(&mut regs_old),
+            std::mem::transmute::<*mut libc::user_regs_struct, *mut libc::c_void>(&mut regs),
+            std::mem::size_of::<libc::user_regs_struct>(),
         );
-        std::process::exit(1);
     }
 
-    if libc::ptrace(libc::PTRACE_SETREGS, process.pid, 0, &mut regs_old) == -1 {
-        println!("Error setting registers ({})", *libc::__errno_location());
-        std::process::exit(1);
-    }
+    regs.rax = address;
+    regs.rdi = *args.first().unwrap_or(&0);
+    regs.rsi = *args.get(1).unwrap_or(&0);
+    regs.rdx = *args.get(2).unwrap_or(&0);
+    regs.rcx = *args.get(3).unwrap_or(&0);
+    regs.r8 = *args.get(4).unwrap_or(&0);
+    regs.r9 = *args.get(5).unwrap_or(&0);
 
-    println!("New RIP: 0x{:x}", regs.rip);
-    println!("Writing old RIP: 0x{:x}", regs_old.rip);
-    file_write(&mut process.mem_file, regs_old.rip, &backup_bytes);
-
-    // if libc::ptrace(libc::PTRACE_CONT, process.pid, 0, 0) == -1 {
-    //     println!("Error PTRACE_CONT ({})", *libc::__errno_location());
-    //     std::process::exit(1);
-    // }
-
-    process.cont();
-
-    Ok(regs.rax)
-}
-
-#[inline(always)]
-unsafe fn _dlopen(
-    process: &mut Process,
-    dlopen_address: u64,
-    string_address: u64,
-    flags: u32,
-) -> Result<u64> {
-    let _ = process.ptrace()?;
-
-    let mut regs: libc::user_regs_struct = std::mem::zeroed();
-    let mut regs_old: libc::user_regs_struct = std::mem::zeroed();
-
-    if libc::ptrace(libc::PTRACE_GETREGS, process.pid, 0, &mut regs) == -1 {
-        println!(
-            "Error while getting registers ({})",
-            *libc::__errno_location()
-        );
-        std::process::exit(1);
-    }
-
-    libc::memcpy(
-        std::mem::transmute::<*mut libc::user_regs_struct, *mut libc::c_void>(&mut regs_old),
-        std::mem::transmute::<*mut libc::user_regs_struct, *mut libc::c_void>(&mut regs),
-        std::mem::size_of::<libc::user_regs_struct>(),
-    );
-
-    regs.rax = dlopen_address;
-    regs.rdi = string_address;
-    regs.rsi = flags as u64;
-    regs.rdx = 0;
-    regs.rcx = 0;
-    regs.r8 = 0;
-    regs.r9 = 0;
-
-    if libc::ptrace(libc::PTRACE_SETREGS, process.pid, 0, &mut regs) == -1 {
-        println!("Error setting registers ({})", *libc::__errno_location());
-        std::process::exit(1);
-    }
+    process.setregs(&regs)?;
 
     let backup_bytes = file_read(&mut process.mem_file, regs.rip, 4);
     println!("Backup bytes: {backup_bytes:x?}");
     file_write(&mut process.mem_file, regs.rip, &[0xff, 0xd0, 0xcc, 0x00]);
 
-    if libc::ptrace(libc::PTRACE_CONT, process.pid, 0, 0) == -1 {
-        println!("Error PTRACE_CONT ({})", *libc::__errno_location());
-        std::process::exit(1);
-    }
+    process.cont()?;
 
     let waitsig_res = process.waitsig(5)?;
     println!("Waitsig result: {waitsig_res}");
 
-    if libc::ptrace(libc::PTRACE_GETREGS, process.pid, 0, &mut regs) == -1 {
-        println!(
-            "Error while getting registers ({})",
-            *libc::__errno_location()
-        );
-        std::process::exit(1);
-    }
+    regs = process.getregs()?;
 
-    if libc::ptrace(libc::PTRACE_SETREGS, process.pid, 0, &mut regs_old) == -1 {
-        println!("Error setting registers ({})", *libc::__errno_location());
-        std::process::exit(1);
-    }
+    process.setregs(&regs_old)?;
 
     println!("New RIP: 0x{:x}", regs.rip);
     println!("Writing old RIP: 0x{:x}", regs_old.rip);
     file_write(&mut process.mem_file, regs_old.rip, &backup_bytes);
 
-    // if libc::ptrace(libc::PTRACE_CONT, process.pid, 0, 0) == -1 {
-    //     println!("Error PTRACE_CONT ({})", errno());
-    //     std::process::exit(1);
-    // }
-
-    process.cont();
-
-    Ok(regs.rax)
-}
-
-#[inline(always)]
-unsafe fn _free(process: &mut Process, free_address: u64, address: u64) -> Result<u64> {
-    let _ = process.ptrace()?;
-
-    let mut regs: libc::user_regs_struct = std::mem::zeroed();
-    let mut regs_old: libc::user_regs_struct = std::mem::zeroed();
-
-    if libc::ptrace(libc::PTRACE_GETREGS, process.pid, 0, &mut regs) == -1 {
-        println!(
-            "Error while getting registers ({})",
-            *libc::__errno_location()
-        );
-        std::process::exit(1);
-    }
-
-    libc::memcpy(
-        std::mem::transmute::<*mut libc::user_regs_struct, *mut libc::c_void>(&mut regs_old),
-        std::mem::transmute::<*mut libc::user_regs_struct, *mut libc::c_void>(&mut regs),
-        std::mem::size_of::<libc::user_regs_struct>(),
-    );
-
-    regs.rax = free_address;
-    regs.rdi = address;
-    regs.rsi = 0;
-    regs.rdx = 0;
-    regs.rcx = 0;
-    regs.r8 = 0;
-    regs.r9 = 0;
-
-    if libc::ptrace(libc::PTRACE_SETREGS, process.pid, 0, &mut regs) == -1 {
-        println!("Error setting registers ({})", *libc::__errno_location());
-        std::process::exit(1);
-    }
-
-    let backup_bytes = file_read(&mut process.mem_file, regs.rip, 4);
-    println!("Backup bytes: {backup_bytes:x?}");
-    file_write(&mut process.mem_file, regs.rip, &[0xff, 0xd0, 0xcc, 0x00]);
-
-    if libc::ptrace(libc::PTRACE_CONT, process.pid, 0, 0) == -1 {
-        println!("Error PTRACE_CONT ({})", *libc::__errno_location());
-        std::process::exit(1);
-    }
-
-    let waitsig_res = process.waitsig(5)?;
-    println!("Waitsig result: {waitsig_res}");
-
-    if libc::ptrace(libc::PTRACE_GETREGS, process.pid, 0, &mut regs) == -1 {
-        println!(
-            "Error while getting registers ({})",
-            *libc::__errno_location()
-        );
-        std::process::exit(1);
-    }
-
-    if libc::ptrace(libc::PTRACE_SETREGS, process.pid, 0, &mut regs_old) == -1 {
-        println!("Error setting registers ({})", *libc::__errno_location());
-        std::process::exit(1);
-    }
-
-    println!("New RIP: 0x{:x}", regs.rip);
-    println!("Writing old RIP: 0x{:x}", regs_old.rip);
-    file_write(&mut process.mem_file, regs_old.rip, &backup_bytes);
-
-    // if libc::ptrace(libc::PTRACE_CONT, process.pid, 0, 0) == -1 {
-    //     println!("Error PTRACE_CONT ({})", *libc::__errno_location());
-    //     std::process::exit(1);
-    // }
-
-    process.cont();
+    process.cont()?;
 
     Ok(regs.rax)
 }
@@ -548,7 +381,7 @@ fn main() -> Result<()> {
         let mut process = Process::new(pid);
 
         let size_to_allocate = lib_path.len() + 1;
-        let allocated_address = _malloc(&mut process, malloc_address, size_to_allocate as u64)?;
+        let allocated_address = _exec(&mut process, malloc_address, &[size_to_allocate as u64])?;
         println!("Malloc allocated address: 0x{allocated_address:x}");
 
         // write the filename into the address
@@ -561,10 +394,10 @@ fn main() -> Result<()> {
         let written = process.mem_file.write(path_as_bytes).unwrap();
         println!("WRITTEN {written} BYTES!!");
 
-        let result = _dlopen(&mut process, dlopen_address, allocated_address, 0x1)?;
+        let result = _exec(&mut process, dlopen_address, &[allocated_address, 0x1])?;
         println!("dlopen result: 0x{result:x}");
 
-        _free(&mut process, free_address, allocated_address);
+        _exec(&mut process, free_address, &[allocated_address])?;
     }
 
     println!("\nArrived here!");
