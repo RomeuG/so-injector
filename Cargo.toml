@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 libc = "0.2.139"
 thiserror = "1.0.38"
+rvg-utils = { git = "https://github.com/RomeuG/rvg-rust-utils" }

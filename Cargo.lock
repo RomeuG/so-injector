@@ -7,6 +7,7 @@ name = "BOI-Hacking-Rust"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rvg-utils",
  "thiserror",
 ]
 
@@ -33,6 +34,11 @@ checksum = "8856d8364d252a14d474036ea1358d63c9e6965c8e5c1885c18f73d70bff9c7b"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "rvg-utils"
+version = "0.1.0"
+source = "git+https://github.com/RomeuG/rvg-rust-utils#34546f8cd1c730fa378dcac0b7bdd402601749da"
 
 [[package]]
 name = "syn"

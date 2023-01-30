@@ -4,6 +4,8 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 
 use thiserror::Error;
 
+use rvg_utils::io::{file_read_bytes, file_write_bytes};
+
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Error, Debug)]
@@ -271,24 +273,6 @@ fn get_first_executable_address(pid: i32) -> Option<u64> {
     None
 }
 
-fn file_read(file: &mut File, address: u64, n: usize) -> Vec<u8> {
-    let mut bytes_vec = vec![0; n];
-
-    file.seek(SeekFrom::Start(address)).unwrap();
-    let b = file.read(&mut bytes_vec).unwrap();
-
-    println!("Read {b} bytes");
-
-    bytes_vec
-}
-
-fn file_write(file: &mut File, address: u64, bytes: &[u8]) {
-    file.seek(SeekFrom::Start(address)).unwrap();
-    let b = file.write(bytes).unwrap();
-
-    println!("Wrote {b} bytes");
-}
-
 unsafe fn get_func_address(dlname: &str, function_name: &str) -> u64 {
     let libc_path: CString = CString::new(dlname).unwrap();
     let func_name: CString = CString::new(function_name).unwrap();
@@ -323,9 +307,9 @@ fn _exec(process: &mut Process, address: u64, args: &[u64]) -> Result<u64> {
 
     process.setregs(&regs)?;
 
-    let backup_bytes = file_read(&mut process.mem_file, regs.rip, 4);
+    let backup_bytes = file_read_bytes(&mut process.mem_file, regs.rip, 4)?;
     println!("Backup bytes: {backup_bytes:x?}");
-    file_write(&mut process.mem_file, regs.rip, &[0xff, 0xd0, 0xcc, 0x00]);
+    file_write_bytes(&mut process.mem_file, regs.rip, &[0xff, 0xd0, 0xcc, 0x00])?;
 
     process.cont()?;
 
@@ -336,9 +320,7 @@ fn _exec(process: &mut Process, address: u64, args: &[u64]) -> Result<u64> {
 
     process.setregs(&regs_old)?;
 
-    println!("New RIP: 0x{:x}", regs.rip);
-    println!("Writing old RIP: 0x{:x}", regs_old.rip);
-    file_write(&mut process.mem_file, regs_old.rip, &backup_bytes);
+    file_write_bytes(&mut process.mem_file, regs_old.rip, &backup_bytes)?;
 
     process.cont()?;
 
