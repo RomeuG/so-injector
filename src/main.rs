@@ -22,6 +22,9 @@ enum Error {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 
+    #[error("Unable to allocate memory")]
+    Null(#[from] std::ffi::NulError),
+
     #[error("Ptrace has not been instantiated")]
     PtraceNotInstantiated,
 
@@ -273,14 +276,23 @@ fn get_first_executable_address(pid: i32) -> Option<u64> {
     None
 }
 
-unsafe fn get_func_address(dlname: &str, function_name: &str) -> u64 {
-    let libc_path: CString = CString::new(dlname).unwrap();
-    let func_name: CString = CString::new(function_name).unwrap();
+fn get_func_address(dlname: &str, function_name: &str) -> Result<Option<u64>> {
+    let libc_path: CString = CString::new(dlname)?;
+    let func_name: CString = CString::new(function_name)?;
 
-    let res = libc::dlopen(libc_path.as_ptr(), libc::RTLD_LAZY);
-    let address = libc::dlsym(res, func_name.as_ptr());
+    let res = unsafe { libc::dlopen(libc_path.as_ptr(), libc::RTLD_LAZY) };
 
-    address as u64
+    if res.is_null() {
+        return Ok(None);
+    }
+
+    let address = unsafe { libc::dlsym(res, func_name.as_ptr()) };
+
+    if address.is_null() {
+        Ok(None)
+    } else {
+        Ok(Some(address as u64))
+    }
 }
 
 fn _exec(process: &mut Process, address: u64, args: &[u64]) -> Result<u64> {
@@ -308,13 +320,11 @@ fn _exec(process: &mut Process, address: u64, args: &[u64]) -> Result<u64> {
     process.setregs(&regs)?;
 
     let backup_bytes = file_read_bytes(&mut process.mem_file, regs.rip, 4)?;
-    println!("Backup bytes: {backup_bytes:x?}");
     file_write_bytes(&mut process.mem_file, regs.rip, &[0xff, 0xd0, 0xcc, 0x00])?;
 
     process.cont()?;
 
     let waitsig_res = process.waitsig(5)?;
-    println!("Waitsig result: {waitsig_res}");
 
     regs = process.getregs()?;
 
@@ -337,50 +347,41 @@ fn main() -> Result<()> {
     let pid: libc::pid_t = args[1].parse()?;
     let lib_path: String = args[2].parse()?;
 
-    unsafe {
-        let dlopen_address = get_func_address("libc.so.6", "dlopen");
-        let malloc_address = get_func_address("libc.so.6", "malloc");
-        let free_address = get_func_address("libc.so.6", "free");
-        let memset_address = get_func_address("libc.so.6", "memset");
+    let dlopen_address = get_func_address("libc.so.6", "dlopen")?.expect("Couldn't find dlopen address");
+    let malloc_address = get_func_address("libc.so.6", "malloc")?.expect("Couldn't find dlopen address");
+    let free_address = get_func_address("libc.so.6", "free")?.expect("Couldn't find dlopen address");
 
-        let libc_base_addr = base_address_of(std::process::id() as i32, "libc").unwrap();
+    let local_libc_base_addr = base_address_of(std::process::id() as i32, "libc").expect("Couldn't find local libc base address");
+    let remote_libc_base_addr = base_address_of(pid, "libc.so").expect("Couldn't find remote libc base address");
 
-        let dlopen_offset = dlopen_address - libc_base_addr;
-        let malloc_offset = malloc_address - libc_base_addr;
-        let free_offset = free_address - libc_base_addr;
-        let memset_offset = memset_address - libc_base_addr;
+    let dlopen_offset = dlopen_address - local_libc_base_addr;
+    let malloc_offset = malloc_address - local_libc_base_addr;
+    let free_offset = free_address - local_libc_base_addr;
 
-        let libc_base_addr = base_address_of(pid, "libc.so").unwrap();
-        let dlopen_address = libc_base_addr + dlopen_offset;
-        let malloc_address = libc_base_addr + malloc_offset;
-        let free_address = libc_base_addr + free_offset;
-        let memset_address = libc_base_addr + memset_offset;
+    let dlopen_address = remote_libc_base_addr + dlopen_offset;
+    let malloc_address = remote_libc_base_addr + malloc_offset;
+    let free_address = remote_libc_base_addr + free_offset;
 
-        println!("dlopen addr: 0x{dlopen_address:x} | offset: 0x{dlopen_offset:x}");
-        println!("malloc addr: 0x{malloc_address:x} | offset: 0x{malloc_offset:x}");
-        println!("free   addr: 0x{free_address:x} | offset: 0x{free_offset:x}");
+    let mut process = Process::new(pid);
 
-        let mut process = Process::new(pid);
+    let size_to_allocate = lib_path.len() + 1;
+    let allocated_address = _exec(&mut process, malloc_address, &[size_to_allocate as u64])?;
+    println!("Malloc allocated address: 0x{allocated_address:x}");
 
-        let size_to_allocate = lib_path.len() + 1;
-        let allocated_address = _exec(&mut process, malloc_address, &[size_to_allocate as u64])?;
-        println!("Malloc allocated address: 0x{allocated_address:x}");
+    // write the filename into the address
+    let path = format!("{lib_path}\0");
+    let path_as_bytes = path.as_bytes();
+    process
+        .mem_file
+        .seek(SeekFrom::Start(allocated_address))
+        .unwrap();
+    let written = process.mem_file.write(path_as_bytes)?;
+    println!("WRITTEN {written} BYTES!!");
 
-        // write the filename into the address
-        let path = format!("{lib_path}\0");
-        let path_as_bytes = path.as_bytes();
-        process
-            .mem_file
-            .seek(SeekFrom::Start(allocated_address))
-            .unwrap();
-        let written = process.mem_file.write(path_as_bytes).unwrap();
-        println!("WRITTEN {written} BYTES!!");
+    let result = _exec(&mut process, dlopen_address, &[allocated_address, 0x1])?;
+    println!("dlopen result: 0x{result:x}");
 
-        let result = _exec(&mut process, dlopen_address, &[allocated_address, 0x1])?;
-        println!("dlopen result: 0x{result:x}");
-
-        _exec(&mut process, free_address, &[allocated_address])?;
-    }
+    _exec(&mut process, free_address, &[allocated_address])?;
 
     println!("\nArrived here!");
 
