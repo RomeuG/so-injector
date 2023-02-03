@@ -337,6 +337,13 @@ fn _exec(process: &mut Process, address: u64, args: &[u64]) -> Result<u64> {
     Ok(regs.rax)
 }
 
+fn remote_address_of(local_address: u64, remote_address: u64, so: &str, function: &str) -> u64 {
+    let address = get_func_address(so, function).unwrap().unwrap();
+    let offset = address - local_address;
+
+    remote_address + offset
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -347,20 +354,31 @@ fn main() -> Result<()> {
     let pid: libc::pid_t = args[1].parse()?;
     let lib_path: String = args[2].parse()?;
 
-    let dlopen_address = get_func_address("libc.so.6", "dlopen")?.expect("Couldn't find dlopen address");
-    let malloc_address = get_func_address("libc.so.6", "malloc")?.expect("Couldn't find dlopen address");
-    let free_address = get_func_address("libc.so.6", "free")?.expect("Couldn't find dlopen address");
+    let local_libc_base_addr = base_address_of(std::process::id() as i32, "libc")
+        .expect("Couldn't find local libc base address");
+    let remote_libc_base_addr =
+        base_address_of(pid, "libc.so").expect("Couldn't find remote libc base address");
 
-    let local_libc_base_addr = base_address_of(std::process::id() as i32, "libc").expect("Couldn't find local libc base address");
-    let remote_libc_base_addr = base_address_of(pid, "libc.so").expect("Couldn't find remote libc base address");
+    let dlopen_address = remote_address_of(
+        local_libc_base_addr,
+        remote_libc_base_addr,
+        "libc.so.6",
+        "dlopen",
+    );
 
-    let dlopen_offset = dlopen_address - local_libc_base_addr;
-    let malloc_offset = malloc_address - local_libc_base_addr;
-    let free_offset = free_address - local_libc_base_addr;
+    let malloc_address = remote_address_of(
+        local_libc_base_addr,
+        remote_libc_base_addr,
+        "libc.so.6",
+        "malloc",
+    );
 
-    let dlopen_address = remote_libc_base_addr + dlopen_offset;
-    let malloc_address = remote_libc_base_addr + malloc_offset;
-    let free_address = remote_libc_base_addr + free_offset;
+    let free_address = remote_address_of(
+        local_libc_base_addr,
+        remote_libc_base_addr,
+        "libc.so.6",
+        "free",
+    );
 
     let mut process = Process::new(pid);
 
