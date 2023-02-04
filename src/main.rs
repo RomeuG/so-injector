@@ -28,20 +28,25 @@ enum Error {
     #[error("Ptrace has not been instantiated")]
     PtraceNotInstantiated,
 
-    #[error("Error attaching to process")]
+    #[error("Error attaching to process (errno = {0})")]
     PtraceAttach(u32),
 
-    #[error("Error continuing process")]
+    #[error("Error continuing process (errno = {0})")]
     PtraceCont(u32),
 
-    #[error("Error getting registers")]
+    #[error("Error getting registers (errno = {0})")]
     PtraceGetregs(u32),
 
-    #[error("Error setting registers")]
+    #[error("Error setting registers (errno = {0})")]
     PtraceSetregs(u32),
 
-    #[error("Error using waitpid")]
+    #[error("Error using waitpid (errno = {0})")]
     Waitpid(u32),
+
+    #[error("Malloc returned error (errno = {0})")]
+    MallocResult(u32),
+    #[error("Dlopen returned error.")]
+    DlopenResult,
 }
 
 fn errno() -> u32 {
@@ -382,26 +387,31 @@ fn main() -> Result<()> {
 
     let mut process = Process::new(pid);
 
-    let size_to_allocate = lib_path.len() + 1;
-    let allocated_address = _exec(&mut process, malloc_address, &[size_to_allocate as u64])?;
-    println!("Malloc allocated address: 0x{allocated_address:x}");
+    // malloc for string
+    let allocated_address = _exec(&mut process, malloc_address, &[(lib_path.len() + 1) as u64])?;
+    if allocated_address == 0x0 {
+        return Err(Error::MallocResult(errno()));
+    }
 
-    // write the filename into the address
+    // write the filename into the malloc'd address
     let path = format!("{lib_path}\0");
     let path_as_bytes = path.as_bytes();
+
     process
         .mem_file
         .seek(SeekFrom::Start(allocated_address))
         .unwrap();
-    let written = process.mem_file.write(path_as_bytes)?;
-    println!("WRITTEN {written} BYTES!!");
+
+    let _ = process.mem_file.write(path_as_bytes)?;
 
     let result = _exec(&mut process, dlopen_address, &[allocated_address, 0x1])?;
-    println!("dlopen result: 0x{result:x}");
+    if result == 0x0 {
+        return Err(Error::DlopenResult);
+    }
 
     _exec(&mut process, free_address, &[allocated_address])?;
 
-    println!("\nArrived here!");
+    println!("Injection successful!");
 
     Ok(())
 }
