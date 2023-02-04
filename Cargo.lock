@@ -3,15 +3,6 @@
 version = 3
 
 [[package]]
-name = "BOI-Hacking-Rust"
-version = "0.1.0"
-dependencies = [
- "libc",
- "rvg-utils",
- "thiserror",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.139"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -39,6 +30,15 @@ dependencies = [
 name = "rvg-utils"
 version = "0.1.0"
 source = "git+https://github.com/RomeuG/rvg-rust-utils#34546f8cd1c730fa378dcac0b7bdd402601749da"
+
+[[package]]
+name = "so-injector"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rvg-utils",
+ "thiserror",
+]
 
 [[package]]
 name = "syn"

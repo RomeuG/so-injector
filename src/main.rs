@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 
 use thiserror::Error;
 
@@ -13,39 +13,39 @@ enum Error {
     #[error("number of arguments is incorrect")]
     NotEnoughArgs,
 
-    #[error("impossible to parse as integer")]
+    #[error("impossible to parse as integer: {0}")]
     ParseInt(#[from] std::num::ParseIntError),
 
-    #[error("impossible to parse")]
+    #[error("impossible to parse: {0}")]
     Parse(#[from] std::convert::Infallible),
 
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 
-    #[error("Unable to allocate memory")]
+    #[error("unable to allocate memory: {0}")]
     Null(#[from] std::ffi::NulError),
 
-    #[error("Ptrace has not been instantiated")]
+    #[error("ptrace has not been instantiated")]
     PtraceNotInstantiated,
 
-    #[error("Error attaching to process (errno = {0})")]
+    #[error("error attaching to process (errno = {0})")]
     PtraceAttach(u32),
 
-    #[error("Error continuing process (errno = {0})")]
+    #[error("error continuing process (errno = {0})")]
     PtraceCont(u32),
 
-    #[error("Error getting registers (errno = {0})")]
+    #[error("error getting registers (errno = {0})")]
     PtraceGetregs(u32),
 
-    #[error("Error setting registers (errno = {0})")]
+    #[error("error setting registers (errno = {0})")]
     PtraceSetregs(u32),
 
-    #[error("Error using waitpid (errno = {0})")]
+    #[error("error using waitpid (errno = {0})")]
     Waitpid(u32),
 
-    #[error("Malloc returned error (errno = {0})")]
+    #[error("malloc returned error (errno = {0})")]
     MallocResult(u32),
-    #[error("Dlopen returned error.")]
+    #[error("dlopen returned error.")]
     DlopenResult,
 }
 
@@ -256,31 +256,6 @@ fn base_address_of(pid: i32, substr: &str) -> Option<u64> {
     None
 }
 
-fn get_first_executable_address(pid: i32) -> Option<u64> {
-    if let Ok(lines) = get_mappings(pid) {
-        for line in lines {
-            let splitted = line.split(' ').collect::<Vec<&str>>();
-            if splitted.get(1)?.contains('x') {
-                let address_space = splitted
-                    .first()
-                    .to_owned()?
-                    .split('-')
-                    .collect::<Vec<&str>>();
-
-                if let Ok(as_u64) = u64::from_str_radix(address_space.first()?, 16) {
-                    return Some(as_u64);
-                } else {
-                    return None;
-                }
-            }
-        }
-    } else {
-        return None;
-    };
-
-    None
-}
-
 fn get_func_address(dlname: &str, function_name: &str) -> Result<Option<u64>> {
     let libc_path: CString = CString::new(dlname)?;
     let func_name: CString = CString::new(function_name)?;
@@ -328,8 +303,7 @@ fn _exec(process: &mut Process, address: u64, args: &[u64]) -> Result<u64> {
     file_write_bytes(&mut process.mem_file, regs.rip, &[0xff, 0xd0, 0xcc, 0x00])?;
 
     process.cont()?;
-
-    let waitsig_res = process.waitsig(5)?;
+    process.waitsig(libc::SIGTRAP)?;
 
     regs = process.getregs()?;
 
@@ -353,6 +327,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() != 3 {
+        println!("Usage:\n\t./so-injector <pid> <shared-object>\n");
         return Err(Error::NotEnoughArgs);
     }
 
@@ -397,14 +372,15 @@ fn main() -> Result<()> {
     let path = format!("{lib_path}\0");
     let path_as_bytes = path.as_bytes();
 
-    process
-        .mem_file
-        .seek(SeekFrom::Start(allocated_address))
-        .unwrap();
+    process.mem_file.seek(SeekFrom::Start(allocated_address))?;
 
     let _ = process.mem_file.write(path_as_bytes)?;
 
-    let result = _exec(&mut process, dlopen_address, &[allocated_address, 0x1])?;
+    let result = _exec(
+        &mut process,
+        dlopen_address,
+        &[allocated_address, libc::RTLD_LAZY as u64],
+    )?;
     if result == 0x0 {
         return Err(Error::DlopenResult);
     }
